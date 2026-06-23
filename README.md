@@ -6,7 +6,7 @@ This project is intentionally scoped as a learning compiler rather than a produc
 
 ## Status
 
-Milestone 1 is complete: elementwise tensor addition and matrix multiplication both lower end to end from tensor-level IR to the `llvm` dialect and execute correctly under MLIR's JIT runner. See [Test Results](#test-results) below for verified output.
+Milestone 1 is complete: elementwise tensor addition, matrix multiplication, 2D convolution, and a fused `relu(add(A, B))` example all lower end to end from tensor-level IR to the `llvm` dialect and execute correctly under MLIR's JIT runner (4 examples, 8 lit tests, all passing). The `relu(add)` example also demonstrates op fusion via `-linalg-fuse-elementwise-ops`, a preview of the tiling/fusion work in the [Roadmap](#roadmap). See [Test Results](#test-results) below for verified output.
 
 ## Goals
 
@@ -41,13 +41,15 @@ Implemented:
 
 - `examples/elementwise_add.mlir` / `elementwise_add_main.mlir` — elementwise tensor addition (`linalg.add`).
 - `examples/matmul.mlir` / `matmul_main.mlir` — matrix multiplication (`linalg.fill` + `linalg.matmul`).
+- `examples/conv2d.mlir` / `conv2d_main.mlir` — 2D convolution, NHWC input / HWCF filter (`linalg.conv_2d_nhwc_hwcf`).
+- `examples/fused_relu_add.mlir` / `fused_relu_add_main.mlir` — `relu(A + B)` (`linalg.add` + `linalg.max`); also demonstrates `-linalg-fuse-elementwise-ops` fusing both into a single `linalg.generic`.
 
 Each example has two files:
 
 - The plain version takes tensors as function arguments and returns a tensor — used by the FileCheck lowering tests.
 - The `_main` version embeds constant input tensors and prints the result — used for JIT execution via `scripts/run_jit_example.sh`.
 
-Planned: 2D convolution, reduction over one dimension, and a fused elementwise example such as `relu(add(A, B))`.
+Planned: reduction over one dimension.
 
 ## Repository Layout
 
@@ -137,6 +139,8 @@ Useful development modes (inherited from `mlir-opt`'s `MlirOptMain`):
 ```sh
 scripts/run_jit_example.sh examples/elementwise_add_main.mlir
 scripts/run_jit_example.sh examples/matmul_main.mlir
+scripts/run_jit_example.sh examples/conv2d_main.mlir
+scripts/run_jit_example.sh examples/fused_relu_add_main.mlir
 ```
 
 It locates `mlir-runner` and the MLIR runner-utils shared libraries via `brew --prefix llvm`; set `LLVM_PREFIX` to override.
@@ -149,7 +153,10 @@ The test suite uses MLIR's `lit` and `FileCheck`. Each test focuses on one stage
 - `test/Lowering/bufferization.mlir` — `one-shot-bufferize` turns tensor arguments into memrefs.
 - `test/Lowering/elementwise-add-to-loops.mlir` — `linalg.add` lowers to a nested `scf.for` loop with scalar `arith.addf`.
 - `test/Lowering/matmul-to-loops.mlir` — `linalg.fill` + `linalg.matmul` lower to a zero-fill loop nest plus a triply-nested `scf.for` loop.
+- `test/Lowering/conv2d-to-loops.mlir` — `linalg.conv_2d_nhwc_hwcf` lowers to nested `scf.for` loops with a multiply-accumulate per output element.
+- `test/Lowering/fused-relu-add-fusion.mlir` — `-linalg-fuse-elementwise-ops` fuses `linalg.add` + `linalg.max` into one `linalg.generic`.
 - `test/Lowering/elementwise-add-to-llvm.mlir` — the full tensor-to-`llvm` pipeline, asserting no `tensor`/`linalg`/`scf` ops remain.
+- `test/Lowering/fused-relu-add-to-llvm.mlir` — same full pipeline for the fused relu(add) example, asserting an `llvm.intr.maximum` remains where the relu clamp lives.
 
 ### Running the tests
 
@@ -164,22 +171,25 @@ cmake --build build --target check
 
 ### Test Results
 
-Verified on macOS (arm64) with Homebrew LLVM/MLIR 22.1.6, 2026-06-19:
+Verified on macOS (arm64) with Homebrew LLVM/MLIR 22.1.6, 2026-06-22:
 
 ```text
--- Testing: 5 tests, 5 workers --
+-- Testing: 8 tests, 8 workers --
 PASS: tensor-pipeline :: Driver/load-tensor-ir.mlir
 PASS: tensor-pipeline :: Lowering/bufferization.mlir
-PASS: tensor-pipeline :: Lowering/elementwise-add-to-loops.mlir
+PASS: tensor-pipeline :: Lowering/fused-relu-add-fusion.mlir
 PASS: tensor-pipeline :: Lowering/matmul-to-loops.mlir
+PASS: tensor-pipeline :: Lowering/elementwise-add-to-loops.mlir
+PASS: tensor-pipeline :: Lowering/conv2d-to-loops.mlir
 PASS: tensor-pipeline :: Lowering/elementwise-add-to-llvm.mlir
+PASS: tensor-pipeline :: Lowering/fused-relu-add-to-llvm.mlir
 
-Testing Time: 1.66s
-Total Discovered Tests: 5
-  Passed: 5 (100.00%)
+Testing Time: 0.25s
+Total Discovered Tests: 8
+  Passed: 8 (100.00%)
 ```
 
-JIT execution of both examples produces the mathematically correct result:
+JIT execution of all four examples produces the mathematically correct result:
 
 ```text
 $ scripts/run_jit_example.sh examples/elementwise_add_main.mlir
@@ -191,9 +201,30 @@ $ scripts/run_jit_example.sh examples/matmul_main.mlir
 Unranked Memref base@ = 0x... rank = 2 offset = 0 sizes = [2, 2] strides = [2, 1] data =
 [[19,   22],
  [43,   50]]
+
+$ scripts/run_jit_example.sh examples/conv2d_main.mlir
+Unranked Memref base@ = 0x... rank = 4 offset = 0 sizes = [1, 3, 3, 1] strides = [9, 3, 1, 1] data =
+[[[[63],
+   [72],
+   [81]],
+  [[108],
+   [117],
+   [126]],
+  [[153],
+   [162],
+   [171]]]]
+
+$ scripts/run_jit_example.sh examples/fused_relu_add_main.mlir
+Unranked Memref base@ = 0x... rank = 2 offset = 0 sizes = [2, 2] strides = [2, 1] data =
+[[3,   0],
+ [0,   3]]
 ```
 
-(`A = [[1,2],[3,4]]`, `B = [[5,6],[7,8]]`: `A+B = [[6,8],[10,12]]` and `A x B = [[19,22],[43,50]]`, both confirmed correct.)
+All confirmed correct by hand:
+
+- `A = [[1,2],[3,4]]`, `B = [[5,6],[7,8]]`: `A+B = [[6,8],[10,12]]`, `A x B = [[19,22],[43,50]]`.
+- `conv2d`: a 5x5 input with values `1..25` (row-major) convolved with a 3x3 all-ones filter is a box-sum filter; the 3x3 output is the sum of each 3x3 window, matching the hand-computed values above.
+- `fused_relu_add`: `A = [[1,-5],[3,-2]]`, `B = [[2,1],[-10,5]]`, so `A+B = [[3,-4],[-7,3]]` and `relu(A+B) = [[3,0],[0,3]]`.
 
 ## Roadmap
 
@@ -203,11 +234,12 @@ Unranked Memref base@ = 0x... rank = 2 offset = 0 sizes = [2, 2] strides = [2, 1
 4. ~~Lower one elementwise tensor example end to end.~~
 5. ~~Add matrix multiplication.~~
 6. ~~Add pass tests with `lit` and `FileCheck`.~~
-7. Implement tiling and fusion experiments.
-8. Add vectorization for small static shapes.
-9. Add documentation for each lowering stage.
-10. Optionally add a small custom tensor dialect.
-11. Add a path to a native executable (object file + linking), not just JIT execution.
+7. ~~Add more examples: 2D convolution and a fused `relu(add(A, B))` op.~~
+8. Implement tiling and fusion experiments (the elementwise fusion in the relu(add) example is a first step).
+9. Add vectorization for small static shapes.
+10. Add documentation for each lowering stage.
+11. Optionally add a small custom tensor dialect.
+12. Add a path to a native executable (object file + linking), not just JIT execution.
 
 ## Design Principles
 
