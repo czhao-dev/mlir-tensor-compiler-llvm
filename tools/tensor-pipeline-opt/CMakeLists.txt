@@ -9,6 +9,7 @@ set(LIBS
   MLIROptLib
   MLIRPass
   MLIRRegisterAllDialects
+  MLIRRegisterAllExtensions
   MLIRRegisterAllPasses
 )
 

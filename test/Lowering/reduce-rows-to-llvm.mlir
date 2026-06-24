@@ -14,18 +14,18 @@
 // RUN:   -reconcile-unrealized-casts \
 // RUN:   -symbol-dce | "FileCheck" "%s"
 
-// End-to-end lowering of elementwise add from tensor/linalg all the way
-// down to the llvm dialect. No tensor, linalg, scf, memref, or arith ops
-// should remain; the function becomes an llvm.func with malloc/fadd/gep.
+// End-to-end lowering of the row reduction from tensor/linalg all the way
+// down to the llvm dialect. No tensor, linalg, or scf ops should remain.
 
-// CHECK-LABEL: llvm.func @elementwise_add
-// CHECK: llvm.call @malloc
+// CHECK-LABEL: llvm.func @reduce_rows
 // CHECK: llvm.fadd
 // CHECK-NOT: linalg.
 // CHECK-NOT: scf.
 // CHECK-NOT: tensor.
-func.func @elementwise_add(%A: tensor<4x4xf32>, %B: tensor<4x4xf32>) -> tensor<4x4xf32> {
-  %init = tensor.empty() : tensor<4x4xf32>
-  %sum = linalg.add ins(%A, %B : tensor<4x4xf32>, tensor<4x4xf32>) outs(%init : tensor<4x4xf32>) -> tensor<4x4xf32>
-  return %sum : tensor<4x4xf32>
+func.func @reduce_rows(%A: tensor<4x4xf32>) -> tensor<4xf32> {
+  %init = tensor.empty() : tensor<4xf32>
+  %cst = arith.constant 0.0 : f32
+  %zeroed = linalg.fill ins(%cst : f32) outs(%init : tensor<4xf32>) -> tensor<4xf32>
+  %result = linalg.reduce { arith.addf } ins(%A : tensor<4x4xf32>) outs(%zeroed : tensor<4xf32>) dimensions = [1]
+  return %result : tensor<4xf32>
 }
