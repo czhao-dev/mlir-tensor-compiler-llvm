@@ -13,11 +13,17 @@
 #include "mlir/InitAllPasses.h"
 #include "mlir/Tools/mlir-opt/MlirOptMain.h"
 
+#include "TTensor/Passes.h"
+#include "TTensor/TTensorOps.h"
+
 int main(int argc, char **argv) {
   mlir::DialectRegistry registry;
   mlir::registerAllDialects(registry);
   mlir::registerAllExtensions(registry);
   mlir::registerAllPasses();
+
+  registry.insert<mlir::ttensor::TTensorDialect>();
+  mlir::ttensor::registerConvertTTensorToLinalgPass();
 
   return mlir::asMainReturnCode(mlir::MlirOptMain(
       argc, argv, "tensor-pipeline-opt: tensor compiler mini-pipeline driver\n",

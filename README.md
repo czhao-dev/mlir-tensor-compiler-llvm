@@ -1,23 +1,8 @@
 # Tensor Compiler Mini-Pipeline
 
-A small MLIR-based compiler project for learning how high-level tensor programs become lower-level executable code. The pipeline starts with tensor operations expressed in the `linalg`/`tensor` dialects, optionally rewrites them with the `transform` dialect (tiling, fusion, vectorization), and lowers them through MLIR's standard dialects — `linalg`, `bufferization`, `scf`, `affine`, `vector`, `memref`, `arith`, `cf`, and finally `llvm` — down to code that can be JIT-executed or compiled into a standalone native executable.
+A small MLIR-based compiler project for learning how high-level tensor programs become lower-level executable code. The pipeline starts with tensor operations expressed in the `linalg`/`tensor` dialects (or the small custom `ttensor` dialect, see below), optionally rewrites them with the `transform` dialect (tiling, fusion, vectorization), and lowers them through MLIR's standard dialects — `linalg`, `bufferization`, `scf`, `affine`, `vector`, `memref`, `arith`, `cf`, and finally `llvm` — down to code that can be JIT-executed or compiled into a standalone native executable.
 
 This project is intentionally scoped as a learning compiler rather than a production framework. Each stage is meant to be easy to understand, test, and debug by hand.
-
-## Status
-
-Milestone 1 is complete: elementwise tensor addition, matrix multiplication, 2D convolution, and a fused `relu(add(A, B))` example all lower end to end from tensor-level IR to the `llvm` dialect and execute correctly under MLIR's JIT runner.
-
-Milestone 2 adds tiling, loop fusion, vectorization, a reduction example, per-stage documentation, and a native (non-JIT) execution path:
-
-- `examples/tiled_matmul.mlir` — tiles a `linalg.matmul` via the transform dialect (`transform.structured.tile_using_for`).
-- `examples/tiled_fused_relu_add.mlir` — tiles `relu(A + B)` and fuses the producer into the tiled loop (`transform.structured.fuse_into_containing_op`), a different flavor of fusion from the op-level fusion below.
-- `examples/vectorized_matmul.mlir` — vectorizes a whole matmul into a single `vector.contract` (`transform.structured.vectorize_children_and_apply_patterns`).
-- `examples/reduce_rows.mlir` — reduction over one dimension (`linalg.reduce`).
-- `docs/` — one short doc per pipeline stage, including the non-obvious pass-ordering constraints tiling and vectorization introduce.
-- `scripts/build_native_example.sh` — builds a standalone native executable (object file + link) instead of JIT-executing, as an alternative to `scripts/run_jit_example.sh`.
-
-8 examples, 15 lit tests, all passing. See [Test Results](#test-results) below for verified output.
 
 ## Goals
 
@@ -33,7 +18,8 @@ Milestone 2 adds tiling, loop fusion, vectorization, a reduction example, per-st
 The current pipeline, exercised end to end by the examples and tests in this repo:
 
 ```text
-tensor + linalg input
+tensor + linalg (or ttensor) input
+  -> [optional] convert-ttensor-to-linalg (custom dialect desugaring)
   -> [optional] transform-interpreter (tiling / fusion / vectorization)
   -> linalg on tensors
   -> one-shot-bufferize (tensor -> memref)
@@ -60,18 +46,21 @@ Implemented:
 - `examples/tiled_fused_relu_add.mlir` / `tiled_fused_relu_add_main.mlir` — `relu(A + B)` again, but tiled with `linalg.add` fused into the tiled loop (`transform.structured.fuse_into_containing_op`) — loop-level fusion, as opposed to the op-level fusion in `fused_relu_add.mlir`.
 - `examples/vectorized_matmul.mlir` / `vectorized_matmul_main.mlir` — the matmul vectorized into a single `vector.contract` via the transform dialect (`transform.structured.vectorize_children_and_apply_patterns`).
 - `examples/reduce_rows.mlir` / `reduce_rows_main.mlir` — reduction over one dimension: sums each row of a tensor (`linalg.reduce`).
+- `examples/ttensor_relu_add.mlir` / `ttensor_relu_add_main.mlir` — `relu(A + B)` again, this time expressed with the custom `ttensor` dialect's single op (`ttensor.relu_add`) instead of spelling out `linalg.add`/`linalg.fill`/`linalg.max` by hand; `-convert-ttensor-to-linalg` expands it into exactly that sequence. See [docs/10-custom-dialect.md](docs/10-custom-dialect.md).
 
 Each example has two files:
 
 - The plain version takes tensors as function arguments and returns a tensor — used by the FileCheck lowering tests.
 - The `_main` version embeds constant input tensors and prints the result — used for JIT execution via `scripts/run_jit_example.sh` or native execution via `scripts/build_native_example.sh`.
 
-The three transform-dialect examples (`tiled_matmul`, `tiled_fused_relu_add`, `vectorized_matmul`) embed their schedule as a `transform.named_sequence` in the same file; running them needs `-transform-interpreter` passed first (see [Running the Compiler](#running-the-compiler)).
+The three transform-dialect examples (`tiled_matmul`, `tiled_fused_relu_add`, `vectorized_matmul`) embed their schedule as a `transform.named_sequence` in the same file; running them needs `-transform-interpreter` passed first (see [Running the Compiler](#running-the-compiler)). `ttensor_relu_add` similarly needs `-convert-ttensor-to-linalg` passed first.
 
 ## Repository Layout
 
 ```text
 .
+├── include/TTensor/                 # ttensor dialect ODS (TableGen) + generated-header glue
+├── lib/TTensor/                     # ttensor dialect registration + -convert-ttensor-to-linalg pass
 ├── tools/tensor-pipeline-opt/       # The compiler driver (mlir-opt-style tool)
 ├── examples/                        # Tensor-level input programs (plain + JIT-runnable)
 ├── test/                            # lit + FileCheck tests for the driver and pass pipeline
@@ -84,7 +73,7 @@ The three transform-dialect examples (`tiled_matmul`, `tiled_fused_relu_add`, `v
 └── README.md
 ```
 
-A custom tensor dialect is not part of the current scope (see [Roadmap](#roadmap)); the project builds entirely on upstream MLIR dialects.
+The project otherwise builds entirely on upstream MLIR dialects; `ttensor` is a single small, custom dialect kept deliberately minimal (one op) and documented in [docs/10-custom-dialect.md](docs/10-custom-dialect.md).
 
 ## Development Setup
 
@@ -149,10 +138,14 @@ build/tools/tensor-pipeline-opt/tensor-pipeline-opt examples/elementwise_add.mli
 
 This prints the fully lowered `llvm` dialect IR for elementwise add. The same pipeline works for every other example. `-expand-strided-metadata`, `-convert-vector-to-scf`, and `-convert-vector-to-llvm` only do real work for the tiled/vectorized examples (see [docs/05-llvm-conversion.md](docs/05-llvm-conversion.md)) but are harmless no-ops otherwise, so the same command line works everywhere.
 
-The three transform-dialect examples additionally need `-transform-interpreter` run *first*, before bufferization:
+The three transform-dialect examples additionally need `-transform-interpreter` run *first*, before bufferization, and `ttensor_relu_add` needs `-convert-ttensor-to-linalg` run first for the same reason:
 
 ```sh
 build/tools/tensor-pipeline-opt/tensor-pipeline-opt examples/tiled_matmul.mlir -transform-interpreter \
+  -one-shot-bufferize="bufferize-function-boundaries" \
+  ... # same pipeline as above
+
+build/tools/tensor-pipeline-opt/tensor-pipeline-opt examples/ttensor_relu_add.mlir -convert-ttensor-to-linalg \
   -one-shot-bufferize="bufferize-function-boundaries" \
   ... # same pipeline as above
 ```
@@ -179,6 +172,9 @@ scripts/run_jit_example.sh examples/reduce_rows_main.mlir
 PRE_PASSES="-transform-interpreter" scripts/run_jit_example.sh examples/tiled_matmul_main.mlir
 PRE_PASSES="-transform-interpreter" scripts/run_jit_example.sh examples/tiled_fused_relu_add_main.mlir
 PRE_PASSES="-transform-interpreter" scripts/run_jit_example.sh examples/vectorized_matmul_main.mlir
+
+# the custom-dialect example needs it desugared to linalg before bufferization:
+PRE_PASSES="-convert-ttensor-to-linalg" scripts/run_jit_example.sh examples/ttensor_relu_add_main.mlir
 ```
 
 It locates `mlir-runner` and the MLIR runner-utils shared libraries via `brew --prefix llvm`; set `LLVM_PREFIX` to override.
@@ -213,6 +209,9 @@ The test suite uses MLIR's `lit` and `FileCheck`. Each test focuses on one stage
 - `test/Lowering/tiled-fused-relu-add-fusion.mlir` — tiling `linalg.max` and fusing `linalg.add` into it produces a single `scf.for` containing both ops.
 - `test/Lowering/vectorized-matmul-vectorization.mlir` — `transform.structured.vectorize_children_and_apply_patterns` turns the matmul into a single `vector.contract`.
 - `test/Lowering/vectorized-matmul-to-llvm.mlir` — the full pipeline (transform-interpreter + lowering) for the vectorized matmul.
+- `test/Driver/load-ttensor-ir.mlir` — the driver loads and round-trips the custom `ttensor` dialect unchanged.
+- `test/Lowering/ttensor-relu-add-to-linalg.mlir` — `-convert-ttensor-to-linalg` expands `ttensor.relu_add` into the same `linalg.add`/`linalg.fill`/`linalg.max` sequence as `fused_relu_add.mlir`.
+- `test/Lowering/ttensor-relu-add-to-llvm.mlir` — the full pipeline (custom-dialect desugaring + lowering) for `ttensor.relu_add`.
 
 ### Running the tests
 
@@ -227,32 +226,35 @@ cmake --build build --target check
 
 ### Test Results
 
-Verified on macOS (arm64) with Homebrew LLVM/MLIR 22.1.6, 2026-06-23:
+Verified on macOS (arm64) with Homebrew LLVM/MLIR 22.1.6, 2026-06-25:
 
 ```text
--- Testing: 15 tests, 8 workers --
-PASS: tensor-pipeline :: Lowering/bufferization.mlir
+-- Testing: 18 tests, 8 workers --
+PASS: tensor-pipeline :: Lowering/elementwise-add-to-loops.mlir
 PASS: tensor-pipeline :: Lowering/conv2d-to-loops.mlir
 PASS: tensor-pipeline :: Lowering/fused-relu-add-fusion.mlir
-PASS: tensor-pipeline :: Lowering/elementwise-add-to-loops.mlir
-PASS: tensor-pipeline :: Lowering/matmul-to-loops.mlir
+PASS: tensor-pipeline :: Driver/load-ttensor-ir.mlir
+PASS: tensor-pipeline :: Lowering/fused-relu-add-to-llvm.mlir
+PASS: tensor-pipeline :: Lowering/bufferization.mlir
 PASS: tensor-pipeline :: Driver/load-tensor-ir.mlir
 PASS: tensor-pipeline :: Lowering/elementwise-add-to-llvm.mlir
-PASS: tensor-pipeline :: Lowering/fused-relu-add-to-llvm.mlir
-PASS: tensor-pipeline :: Lowering/reduce-rows-to-llvm.mlir
+PASS: tensor-pipeline :: Lowering/matmul-to-loops.mlir
 PASS: tensor-pipeline :: Lowering/reduce-rows-to-loops.mlir
-PASS: tensor-pipeline :: Lowering/tiled-matmul-tiling.mlir
+PASS: tensor-pipeline :: Lowering/reduce-rows-to-llvm.mlir
 PASS: tensor-pipeline :: Lowering/tiled-fused-relu-add-fusion.mlir
-PASS: tensor-pipeline :: Lowering/vectorized-matmul-vectorization.mlir
+PASS: tensor-pipeline :: Lowering/ttensor-relu-add-to-linalg.mlir
+PASS: tensor-pipeline :: Lowering/tiled-matmul-tiling.mlir
+PASS: tensor-pipeline :: Lowering/ttensor-relu-add-to-llvm.mlir
 PASS: tensor-pipeline :: Lowering/tiled-matmul-to-llvm.mlir
+PASS: tensor-pipeline :: Lowering/vectorized-matmul-vectorization.mlir
 PASS: tensor-pipeline :: Lowering/vectorized-matmul-to-llvm.mlir
 
-Testing Time: 0.43s
-Total Discovered Tests: 15
-  Passed: 15 (100.00%)
+Testing Time: 1.20s
+Total Discovered Tests: 18
+  Passed: 18 (100.00%)
 ```
 
-JIT execution of all eight examples produces the mathematically correct result:
+JIT execution of all nine examples produces the mathematically correct result:
 
 ```text
 $ scripts/run_jit_example.sh examples/elementwise_add_main.mlir
@@ -308,6 +310,11 @@ $ PRE_PASSES="-transform-interpreter" scripts/run_jit_example.sh examples/vector
 Unranked Memref base@ = 0x... rank = 2 offset = 0 sizes = [2, 2] strides = [2, 1] data =
 [[19,   22],
  [43,   50]]
+
+$ PRE_PASSES="-convert-ttensor-to-linalg" scripts/run_jit_example.sh examples/ttensor_relu_add_main.mlir
+Unranked Memref base@ = 0x... rank = 2 offset = 0 sizes = [2, 2] strides = [2, 1] data =
+[[3,   0],
+ [0,   3]]
 ```
 
 All confirmed correct by hand:
@@ -318,23 +325,9 @@ All confirmed correct by hand:
 - `reduce_rows`: `A = [[1,2,3],[4,5,6]]`, row sums `[1+2+3, 4+5+6] = [6, 15]`.
 - `tiled_matmul`: `A x I = A` for the 4x4 identity `I`, so the tiled-and-lowered result should equal `A = [[1,2,3,4],[5,6,7,8],[9,10,11,12],[13,14,15,16]]` unchanged.
 - `tiled_fused_relu_add`: `A` is `2.0` everywhere; `B` is `-10.0` in its top half and `+10.0` in its bottom half, so `relu(A+B)` is `0` in the top half (`max(2-10, 0)`) and `12` in the bottom half (`max(2+10, 0)`).
+- `ttensor_relu_add`: same inputs as `fused_relu_add`, so the same result, `[[3,0],[0,3]]`, confirming `ttensor.relu_add` computes the same thing as the hand-written `linalg` sequence.
 
-Native execution of every example via `scripts/build_native_example.sh` was also verified to produce byte-for-byte identical output to the JIT path above (including the four new examples, with `PRE_PASSES="-transform-interpreter"` for the transform-dialect ones).
-
-## Roadmap
-
-1. ~~Create the CMake project skeleton.~~
-2. ~~Add a minimal compiler driver.~~
-3. ~~Accept `.mlir` input files and run a configurable pass pipeline.~~
-4. ~~Lower one elementwise tensor example end to end.~~
-5. ~~Add matrix multiplication.~~
-6. ~~Add pass tests with `lit` and `FileCheck`.~~
-7. ~~Add more examples: 2D convolution and a fused `relu(add(A, B))` op.~~
-8. ~~Implement tiling and fusion experiments~~ — `tiled_matmul.mlir` (tiling) and `tiled_fused_relu_add.mlir` (tiling + producer/consumer loop fusion), via the transform dialect.
-9. ~~Add vectorization for small static shapes~~ — `vectorized_matmul.mlir`.
-10. ~~Add documentation for each lowering stage~~ — see [`docs/`](docs/).
-11. Optionally add a small custom tensor dialect.
-12. ~~Add a path to a native executable (object file + linking), not just JIT execution~~ — `scripts/build_native_example.sh`.
+Native execution of every example via `scripts/build_native_example.sh` was also verified to produce byte-for-byte identical output to the JIT path above (including the five new examples, with `PRE_PASSES="-transform-interpreter"` for the transform-dialect ones and `PRE_PASSES="-convert-ttensor-to-linalg"` for `ttensor_relu_add`).
 
 ## Design Principles
 

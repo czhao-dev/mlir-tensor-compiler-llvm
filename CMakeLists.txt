@@ -23,8 +23,12 @@ include(HandleLLVMOptions)
 
 include_directories(${LLVM_INCLUDE_DIRS})
 include_directories(${MLIR_INCLUDE_DIRS})
+include_directories(${CMAKE_CURRENT_SOURCE_DIR}/include)
+include_directories(${CMAKE_CURRENT_BINARY_DIR}/include)
 add_definitions(${LLVM_DEFINITIONS})
 
+add_subdirectory(include/TTensor)
+add_subdirectory(lib/TTensor)
 add_subdirectory(tools/tensor-pipeline-opt)
 
 enable_testing()

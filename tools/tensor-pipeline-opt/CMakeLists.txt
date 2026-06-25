@@ -11,6 +11,7 @@ set(LIBS
   MLIRRegisterAllDialects
   MLIRRegisterAllExtensions
   MLIRRegisterAllPasses
+  MLIRTTensor
 )
 
 add_llvm_executable(tensor-pipeline-opt tensor-pipeline-opt.cpp)
